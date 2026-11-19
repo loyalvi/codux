@@ -23,6 +23,8 @@
       "sidebar.project.edit": "Edit Project",
       "sidebar.project.open_folder": "Open Folder",
       "sidebar.project.remove": "Remove Project",
+      "sidebar.project.hide": "Hide from Sidebar",
+      "sidebar.footer.hidden_projects": "Hidden Projects",
       "sidebar.workspace": "Workspace",
       "sidebar.footer.ai_usage": "AI Usage"
     },
@@ -114,6 +116,8 @@
       "sidebar.project.edit": "编辑项目",
       "sidebar.project.open_folder": "打开文件夹",
       "sidebar.project.remove": "移除项目",
+      "sidebar.project.hide": "从侧栏隐藏",
+      "sidebar.footer.hidden_projects": "已隐藏项目",
       "sidebar.workspace": "工作区",
       "sidebar.footer.ai_usage": "AI 用量"
     },
@@ -127,6 +131,8 @@
       "sidebar.project.edit": "編輯項目",
       "sidebar.project.open_folder": "開啟資料夾",
       "sidebar.project.remove": "刪除項目",
+      "sidebar.project.hide": "從側欄隱藏",
+      "sidebar.footer.hidden_projects": "已隱藏專案",
       "sidebar.workspace": "工作區",
       "sidebar.footer.ai_usage": "AI 用量"
     }

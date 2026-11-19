@@ -188,6 +188,14 @@ impl CoduxApp {
         cx: &mut Context<Self>,
     ) {
         match target {
+            FilePickerTarget::ProjectEditorIcon => {
+                if matches!(destination_target, ProjectRuntimeTarget::Local) {
+                    self.apply_project_icon(Some(std::path::PathBuf::from(path)), cx);
+                } else {
+                    self.status_message = "Choose a PNG from this computer.".to_string();
+                    self.invalidate_project_management(cx);
+                }
+            }
             FilePickerTarget::ProjectEditorPath => {
                 // The picker chose both the device and the directory.
                 self.project_editor_runtime_target = destination_target;

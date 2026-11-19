@@ -17,6 +17,7 @@ const PROJECT_TOOL_ICON_WIDTH: f32 = 40.0;
 struct ProjectRowDrag {
     project_id: String,
     project: ProjectInfo,
+    custom_icon: Option<std::path::PathBuf>,
     active: bool,
     collapsed: bool,
 }
@@ -30,7 +31,12 @@ impl Render for ProjectRowDrag {
             .flex()
             .items_center()
             .justify_center()
-            .child(project_icon(&self.project, self.active, self.collapsed))
+            .child(project_icon(
+                &self.project,
+                self.custom_icon.clone(),
+                self.active,
+                self.collapsed,
+            ))
     }
 }
 
@@ -50,6 +56,7 @@ pub(in crate::app) struct ProjectListState {
     /// Client→host link state per host device id, for the remote connection
     /// badge on a project icon.
     pub(in crate::app) links: HashMap<String, ControllerLinkState>,
+    pub(super) hidden_projects: std::collections::BTreeSet<String>,
     revision: u64,
 }
 
@@ -63,6 +70,7 @@ impl ProjectListState {
             selected_project_id,
             lifecycle: HashMap::new(),
             links: HashMap::new(),
+            hidden_projects: Default::default(),
             revision: 0,
         }
     }
@@ -126,16 +134,18 @@ impl ProjectListState {
 impl Render for ProjectColumnView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.collapsed;
-        let (projects, selected_project_id, lifecycle, links) =
+        let (projects, selected_project_id, lifecycle, links, hidden) =
             self.project_list_state.update(cx, |state, _cx| {
                 (
                     state.projects.clone(),
                     state.selected_project_id.clone(),
                     state.lifecycle.clone(),
                     state.links.clone(),
+                    state.hidden_projects.clone(),
                 )
             });
         let app_entity = self.app_entity.clone();
+        let support_dir = app_entity.read(cx).state.support_dir.clone();
         let scroll_handle = self.scroll_handle.clone();
         let language = self.language.clone();
         let row_menu_labels = project_row_menu_labels(language.as_str());
@@ -143,6 +153,12 @@ impl Render for ProjectColumnView {
             .iter()
             .map(|project| project.id.clone())
             .collect::<Vec<_>>();
+
+        let (hidden_projects, visible_projects): (Vec<_>, Vec<_>) = projects
+            .iter()
+            .cloned()
+            .partition(|project| hidden.contains(&project.id));
+        let visible_projects = Rc::new(visible_projects);
 
         div()
             .flex()
@@ -171,7 +187,7 @@ impl Render for ProjectColumnView {
                     .overflow_hidden()
                     .child(codux_uniform_list(
                         "project-list",
-                        projects.clone(),
+                        visible_projects,
                         scroll_handle,
                         None,
                         cx,
@@ -193,6 +209,11 @@ impl Render for ProjectColumnView {
                                 .pb(px(4.0))
                                 .child(project_row(
                                     ProjectRowInput {
+                                        custom_icon:
+                                            super::project_editor::custom_project_icon_path(
+                                                &support_dir,
+                                                &project.id,
+                                            ),
                                         project,
                                         active,
                                         app_entity: app_entity.clone(),
@@ -214,6 +235,7 @@ impl Render for ProjectColumnView {
                 collapsed,
                 self.language.as_str(),
                 self.app_entity.clone(),
+                hidden_projects,
                 window,
                 cx,
             ))
@@ -274,6 +296,7 @@ fn project_tools_snapshot(
     collapsed: bool,
     language: &str,
     app_entity: gpui::Entity<CoduxApp>,
+    hidden_projects: Vec<ProjectInfo>,
     window: &mut Window,
     cx: &mut Context<ProjectColumnView>,
 ) -> AnyElement {
@@ -303,6 +326,15 @@ fn project_tools_snapshot(
                 cx,
                 |app, _event, window, cx| app.open_project_create_window(window, cx),
             ))
+            .when(!hidden_projects.is_empty(), |base| {
+                base.child(hidden_projects_button(
+                    collapsed,
+                    language,
+                    app_entity.clone(),
+                    hidden_projects,
+                    cx,
+                ))
+            })
             .child(project_tool_button(
                 ProjectToolButtonProps {
                     icon: HeroIconName::Cog6Tooth,
@@ -347,6 +379,15 @@ fn project_tools_snapshot(
                 cx,
                 |app, _event, window, cx| app.open_project_create_window(window, cx),
             ))
+            .when(!hidden_projects.is_empty(), |base| {
+                base.child(hidden_projects_button(
+                    collapsed,
+                    language,
+                    app_entity.clone(),
+                    hidden_projects,
+                    cx,
+                ))
+            })
             .child(project_tool_button(
                 ProjectToolButtonProps {
                     icon: HeroIconName::Cog6Tooth,
@@ -367,6 +408,67 @@ fn project_tools_snapshot(
                 cx,
             ))
             .into_any_element()
+    }
+}
+
+fn hidden_projects_button(
+    collapsed: bool,
+    language: &str,
+    app_entity: gpui::Entity<CoduxApp>,
+    projects: Vec<ProjectInfo>,
+    cx: &mut Context<ProjectColumnView>,
+) -> AnyElement {
+    let label = project_column_text(
+        language,
+        "sidebar.footer.hidden_projects",
+        "Hidden Projects",
+    );
+    let button = Button::new("project-tool-hidden-projects")
+        .ghost()
+        .with_size(Size::Medium)
+        .text_color(cx.theme().secondary_foreground)
+        .w(if collapsed {
+            px(PROJECT_TOOL_ICON_WIDTH)
+        } else {
+            px(PROJECT_TOOL_LABEL_WIDTH)
+        });
+    let button = if collapsed {
+        button
+    } else {
+        button.justify_start()
+    };
+    let menu_entity = app_entity.clone();
+    let button = button
+        .child(project_tool_content(
+            HeroIconName::ArchiveBox,
+            (!collapsed).then(|| label.clone()),
+            cx,
+        ))
+        .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _window, _cx| {
+            projects
+                .iter()
+                .fold(menu.min_w(px(256.0)).max_w(px(360.0)), |menu, project| {
+                    let entity = menu_entity.clone();
+                    let project_id = project.id.clone();
+                    let label = format!("{} · {}", project.name, project.path);
+                    menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        cx.update_entity(&entity, |app, cx| {
+                            app.set_project_sidebar_hidden(project_id.clone(), false, window, cx);
+                        });
+                    }))
+                })
+        });
+    if collapsed {
+        codux_tooltip_container_with_placement(
+            app_entity,
+            "project-tool-hidden-projects-tooltip",
+            label,
+            CoduxTooltipPlacement::Right,
+        )
+        .child(button)
+        .into_any_element()
+    } else {
+        button.into_any_element()
     }
 }
 
@@ -687,6 +789,7 @@ fn project_column_toggle_button(
 
 struct ProjectRowInput {
     project: ProjectInfo,
+    custom_icon: Option<std::path::PathBuf>,
     active: bool,
     app_entity: gpui::Entity<CoduxApp>,
     project_id: String,
@@ -704,6 +807,7 @@ fn project_row(
 ) -> AnyElement {
     let ProjectRowInput {
         project,
+        custom_icon,
         active,
         app_entity,
         project_id,
@@ -728,6 +832,7 @@ fn project_row(
                 ProjectRowDrag {
                     project_id: drag_project.id.clone(),
                     project: drag_project,
+                    custom_icon: custom_icon.clone(),
                     active,
                     collapsed: true,
                 },
@@ -736,6 +841,7 @@ fn project_row(
                     cx.new(|_| ProjectRowDrag {
                         project_id: drag.project_id.clone(),
                         project: drag.project.clone(),
+                        custom_icon: drag.custom_icon.clone(),
                         active: drag.active,
                         collapsed: drag.collapsed,
                     })
@@ -823,7 +929,7 @@ fn project_row(
                         .child(
                             div()
                                 .relative()
-                                .child(project_icon(&project, active, true))
+                                .child(project_icon(&project, custom_icon, active, true))
                                 .when_some(lifecycle_state, |this, state| {
                                     this.child(project_lifecycle_badge(state))
                                 })
@@ -846,6 +952,7 @@ fn project_row(
             ProjectRowDrag {
                 project_id: drag_project.id.clone(),
                 project: drag_project,
+                custom_icon: custom_icon.clone(),
                 active,
                 collapsed: false,
             },
@@ -854,6 +961,7 @@ fn project_row(
                 cx.new(|_| ProjectRowDrag {
                     project_id: drag.project_id.clone(),
                     project: drag.project.clone(),
+                    custom_icon: drag.custom_icon.clone(),
                     active: drag.active,
                     collapsed: drag.collapsed,
                 })
@@ -918,7 +1026,7 @@ fn project_row(
                 .child(
                     div()
                         .relative()
-                        .child(project_icon(&project, active, false))
+                        .child(project_icon(&project, custom_icon, active, false))
                         .when_some(lifecycle_state, |this, state| {
                             this.child(project_lifecycle_badge(state))
                         })
@@ -963,6 +1071,7 @@ struct ProjectRowMenuLabels {
     open_folder: String,
     edit: String,
     remove: String,
+    hide: String,
 }
 
 fn project_row_menu_labels(language: &str) -> ProjectRowMenuLabels {
@@ -971,6 +1080,7 @@ fn project_row_menu_labels(language: &str) -> ProjectRowMenuLabels {
         open_folder: translate(&locale, "sidebar.project.open_folder", "Open Folder"),
         edit: translate(&locale, "sidebar.project.edit", "Edit Project"),
         remove: translate(&locale, "sidebar.project.remove", "Remove Project"),
+        hide: translate(&locale, "sidebar.project.hide", "Hide from Sidebar"),
     }
 }
 
@@ -987,6 +1097,8 @@ fn project_row_context_menu(
     let open_path = project_path.clone();
     let edit_entity = app_entity.clone();
     let edit_id = project_id.clone();
+    let hide_entity = app_entity.clone();
+    let hide_id = project_id.clone();
     let remove_entity = app_entity;
 
     menu.item(
@@ -1004,6 +1116,15 @@ fn project_row_context_menu(
             .on_click(move |_, window, cx| {
                 cx.update_entity(&edit_entity, |app, cx| {
                     app.edit_project_by_id(edit_id.clone(), window, cx);
+                });
+            }),
+    )
+    .item(
+        PopupMenuItem::new(labels.hide)
+            .icon(HeroIconName::EyeSlash)
+            .on_click(move |_, window, cx| {
+                cx.update_entity(&hide_entity, |app, cx| {
+                    app.set_project_sidebar_hidden(hide_id.clone(), true, window, cx);
                 });
             }),
     )
@@ -1096,7 +1217,12 @@ fn project_remote_badge(link: Option<ControllerLinkState>) -> AnyElement {
         .into_any_element()
 }
 
-fn project_icon(project: &ProjectInfo, active: bool, collapsed: bool) -> impl IntoElement {
+fn project_icon(
+    project: &ProjectInfo,
+    custom_icon: Option<std::path::PathBuf>,
+    active: bool,
+    collapsed: bool,
+) -> impl IntoElement {
     let (background, _accent, text) = match project
         .badge_color_hex
         .as_deref()
@@ -1126,12 +1252,17 @@ fn project_icon(project: &ProjectInfo, active: bool, collapsed: bool) -> impl In
         .text_color(color(text))
         .font_weight(FontWeight::BOLD)
         .when(!active, |this| this.opacity(INACTIVE_PROJECT_ICON_OPACITY))
-        .child(match symbol_icon {
-            Some(icon) => Icon::new(icon)
+        .overflow_hidden()
+        .child(match (custom_icon, symbol_icon) {
+            (Some(path), _) => gpui::img(path)
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element(),
+            (None, Some(icon)) => Icon::new(icon)
                 .size_4()
                 .text_color(color(text))
                 .into_any_element(),
-            None => project_badge_text_element(&badge, text),
+            (None, None) => project_badge_text_element(&badge, text),
         })
 }
 

@@ -2,6 +2,58 @@ use super::FilePickerOpenRequest;
 use super::*;
 
 impl CoduxApp {
+    pub(in crate::app) fn pick_project_icon(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_file_picker_window(
+            FilePickerOpenRequest {
+                mode: FilePickerMode::OpenFile,
+                target: FilePickerTarget::ProjectEditorIcon,
+                runtime_target: ProjectRuntimeTarget::Local,
+                start_path: None,
+                default_filename: None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(in crate::app) fn apply_project_icon(
+        &mut self,
+        path: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project_id) = self.project_editor_project_id.clone() else {
+            return;
+        };
+        let result = crate::app::project_editor::update_custom_project_icon(
+            &self.state.support_dir,
+            &project_id,
+            path.as_deref(),
+        );
+        self.status_message = match result {
+            Ok(()) => "Project image updated.".into(),
+            Err(error) => format!("Project image could not be updated: {error}"),
+        };
+        self.refresh_project_icon_view(cx);
+        if let Some(parent) = self
+            .parent_main_window
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+        {
+            parent.update(cx, |app, cx| app.refresh_project_icon_view(cx));
+        }
+    }
+
+    fn refresh_project_icon_view(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.project_column_view.as_ref() {
+            view.update(cx, |_view, cx| cx.notify());
+        }
+        self.invalidate_project_management(cx);
+    }
+
     pub(in crate::app) fn reorder_projects_by_ids(
         &mut self,
         project_ids: Vec<String>,

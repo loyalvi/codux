@@ -93,6 +93,45 @@ impl CoduxApp {
                         &self.project_editor_badge_color_hex,
                         cx,
                     ))
+                    .when(is_editing, |panel| {
+                        let has_icon =
+                            self.project_editor_project_id.as_deref().is_some_and(|id| {
+                                custom_project_icon_path(&self.state.support_dir, id).is_some()
+                            });
+                        panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(tr(
+                                    "project.editor.image.note",
+                                    "Project image (applies immediately)",
+                                ))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(dialog_primary_button(
+                                            "project-editor-choose-image",
+                                            tr("project.editor.image.choose", "Choose PNG…"),
+                                            cx,
+                                            |app, _, window, cx| app.pick_project_icon(window, cx),
+                                        ))
+                                        .child(
+                                            dialog_cancel_button(
+                                                "project-editor-reset-image",
+                                                tr("project.editor.image.reset", "Reset image"),
+                                                cx,
+                                                |app, _, _, cx| app.apply_project_icon(None, cx),
+                                            )
+                                            .disabled(!has_icon),
+                                        ),
+                                )
+                                .when(self.status_message.starts_with("Project image"), |row| {
+                                    row.child(self.status_message.clone())
+                                }),
+                        )
+                    })
                     .child(project_editor_environment_field(
                         tr("project.editor.environment", "Environment Variables"),
                         tr("project.editor.environment.add", "Add Variable"),
@@ -1529,5 +1568,118 @@ mod breadcrumb_tests {
         let (root, segments) = crumbs(codux_runtime::path::FILE_LIST_DRIVES_SENTINEL);
         assert_eq!(root, codux_runtime::path::FILE_LIST_DRIVES_SENTINEL);
         assert!(segments.is_empty());
+    }
+}
+
+fn custom_project_icon_dir(support_dir: &std::path::Path, project_id: &str) -> std::path::PathBuf {
+    let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, project_id.as_bytes());
+    support_dir.join("project-icons").join(key.to_string())
+}
+
+pub(in crate::app) fn custom_project_icon_path(
+    support_dir: &std::path::Path,
+    project_id: &str,
+) -> Option<std::path::PathBuf> {
+    let dir = custom_project_icon_dir(support_dir, project_id);
+    let key = std::fs::read_to_string(dir.join("current")).ok()?;
+    let key = uuid::Uuid::parse_str(key.trim()).ok()?;
+    let path = dir.join(format!("{key}.png"));
+    path.is_file().then_some(path)
+}
+
+pub(in crate::app) fn update_custom_project_icon(
+    support_dir: &std::path::Path,
+    project_id: &str,
+    source: Option<&std::path::Path>,
+) -> Result<(), String> {
+    use std::io::Read as _;
+    let dir = custom_project_icon_dir(support_dir, project_id);
+    let Some(source) = source else {
+        return match std::fs::remove_dir_all(dir) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        };
+    };
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(source)
+        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("The PNG exceeds 8 MB.".into());
+    }
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|error| format!("Invalid PNG: {error}"))?;
+
+    let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let destination = dir.join(format!("{key}.png"));
+    let previous = custom_project_icon_path(support_dir, project_id);
+    if !destination.is_file() {
+        std::fs::write(&destination, bytes).map_err(|error| error.to_string())?;
+    }
+    let draft = dir.join("current.tmp");
+    std::fs::write(&draft, key.to_string()).map_err(|error| error.to_string())?;
+    std::fs::rename(&draft, dir.join("current")).map_err(|error| error.to_string())?;
+    if let Some(previous) = previous.filter(|old| old != &destination) {
+        let _ = std::fs::remove_file(previous);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod custom_project_icon_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn validates_copies_replaces_and_resets_project_image() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("codux-icon-test-{}-{nonce}", std::process::id()));
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _temp = TempDir(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.png");
+        let id = "../project";
+        std::fs::write(&source, b"not a PNG").unwrap();
+        assert!(update_custom_project_icon(&dir, id, Some(&source)).is_err());
+        assert!(custom_project_icon_path(&dir, id).is_none());
+
+        image::RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 0]))
+            .save(&source)
+            .unwrap();
+        update_custom_project_icon(&dir, id, Some(&source)).unwrap();
+        let first = custom_project_icon_path(&dir, id).unwrap();
+        assert_ne!(first, source);
+        assert!(first.starts_with(dir.join("project-icons")));
+
+        image::RgbImage::from_pixel(1, 1, image::Rgb([0, 0, 255]))
+            .save(&source)
+            .unwrap();
+        update_custom_project_icon(&dir, id, Some(&source)).unwrap();
+        let second = custom_project_icon_path(&dir, id).unwrap();
+        assert_ne!(first, second);
+        std::fs::remove_file(&source).unwrap();
+        assert!(second.is_file());
+        assert!(custom_project_icon_path(&dir, "another project").is_none());
+        update_custom_project_icon(&dir, id, None).unwrap();
+        assert!(custom_project_icon_path(&dir, id).is_none());
     }
 }
