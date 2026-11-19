@@ -1314,6 +1314,8 @@ dependencies = [
  "qrcode",
  "raw-window-handle",
  "regex",
+ "resvg",
+ "roxmltree",
  "rust-embed",
  "rustls",
  "serde",

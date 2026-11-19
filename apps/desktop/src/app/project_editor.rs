@@ -113,7 +113,7 @@ impl CoduxApp {
                                         .gap_2()
                                         .child(dialog_primary_button(
                                             "project-editor-choose-image",
-                                            tr("project.editor.image.choose", "Choose PNG…"),
+                                            tr("project.editor.image.choose", "Choose PNG or SVG…"),
                                             cx,
                                             |app, _, window, cx| app.pick_project_icon(window, cx),
                                         ))
@@ -1607,17 +1607,22 @@ pub(in crate::app) fn update_custom_project_icon(
         .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
         .map_err(|error| error.to_string())?;
     if bytes.len() as u64 > MAX_BYTES {
-        return Err("The PNG exceeds 8 MB.".into());
+        return Err("The project image exceeds 8 MB.".into());
     }
-    let mut reader =
-        image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png);
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(2048);
-    limits.max_image_height = Some(2048);
-    reader.limits(limits);
-    reader
-        .decode()
-        .map_err(|error| format!("Invalid PNG: {error}"))?;
+    let bytes = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut reader =
+            image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(2048);
+        limits.max_image_height = Some(2048);
+        reader.limits(limits);
+        reader
+            .decode()
+            .map_err(|error| format!("Invalid PNG: {error}"))?;
+        bytes
+    } else {
+        rasterize_project_svg(&bytes)?
+    };
 
     let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
@@ -1635,10 +1640,159 @@ pub(in crate::app) fn update_custom_project_icon(
     Ok(())
 }
 
+// Rasterize only static SVG icons. Neither SVG bytes nor references are passed
+// to the UI renderer, and all persisted project images keep the PNG contract.
+fn rasterize_project_svg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    const SVG_NS: &str = "http://www.w3.org/2000/svg";
+    const MAX_SVG_BYTES: usize = 256 * 1024;
+    const TILE_SIZE: u32 = 256;
+    const GLYPH_SIZE: f32 = 190.0;
+    if bytes.len() > MAX_SVG_BYTES {
+        return Err("The SVG exceeds 256 KB.".into());
+    }
+    let source =
+        std::str::from_utf8(bytes).map_err(|_| "Choose a PNG or a UTF-8 SVG.".to_string())?;
+    let doc = roxmltree::Document::parse_with_options(
+        source,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 4096,
+        },
+    )
+    .map_err(|error| format!("Invalid SVG: {error}"))?;
+    let root = doc.root_element();
+    if !root.has_tag_name((SVG_NS, "svg")) {
+        return Err("Choose a PNG or an SVG document.".into());
+    }
+    for node in doc.descendants().filter(|node| node.is_element()) {
+        let tag = node.tag_name();
+        if tag.namespace() != Some(SVG_NS)
+            || !matches!(
+                tag.name(),
+                "svg"
+                    | "g"
+                    | "defs"
+                    | "path"
+                    | "rect"
+                    | "circle"
+                    | "ellipse"
+                    | "line"
+                    | "polyline"
+                    | "polygon"
+                    | "linearGradient"
+                    | "radialGradient"
+                    | "stop"
+                    | "clipPath"
+                    | "mask"
+                    | "title"
+                    | "desc"
+            )
+            || node.ancestors().nth(34).is_some()
+        {
+            return Err(format!(
+                "Unsupported element in a static SVG icon: {}.",
+                tag.name()
+            ));
+        }
+        if node.attributes().any(|attribute| {
+            attribute.name().starts_with("on")
+                || (attribute.name() == "href" && !attribute.value().trim().starts_with('#'))
+        }) {
+            return Err("Scripts and external SVG resources are not supported.".into());
+        }
+    }
+    // Most outline icons specify currentColor and expect a foreground color
+    // from their host. Supply white for a single viewport on the colored tile
+    // only when the author did not set color (an inline style still wins).
+    let default_color = root.attribute("color").is_none()
+        && !root
+            .descendants()
+            .skip(1)
+            .any(|node| node.has_tag_name((SVG_NS, "svg")));
+    let options = resvg::usvg::Options {
+        style_sheet: default_color.then(|| "svg { color: white; }".to_string()),
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    let tree = resvg::usvg::Tree::from_xmltree(&doc, &options)
+        .map_err(|error| format!("Invalid SVG: {error}"))?;
+    let size = tree.size();
+    let (width, height) = (size.width(), size.height());
+    let scale = GLYPH_SIZE / width.max(height);
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("Invalid SVG dimensions.".into());
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(TILE_SIZE, TILE_SIZE)
+        .ok_or_else(|| "Could not allocate the SVG preview.".to_string())?;
+    let x = (TILE_SIZE as f32 - width * scale) / 2.0;
+    let y = (TILE_SIZE as f32 - height * scale) / 2.0;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, x, y),
+        &mut pixmap.as_mut(),
+    );
+    if !pixmap.data().chunks_exact(4).any(|pixel| pixel[3] != 0) {
+        return Err("The SVG does not contain a visible icon.".into());
+    }
+    pixmap.encode_png().map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod custom_project_icon_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn svg_rasterization_centers_and_bounds_a_static_icon() {
+        let png = rasterize_project_svg(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">
+                <rect width="40" height="20" fill="red"/>
+            </svg>"#,
+        )
+        .unwrap();
+        let icon = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(icon.dimensions(), (256, 256));
+        assert_eq!(icon.get_pixel(128, 128).0, [255, 0, 0, 255]);
+        assert_eq!(icon.get_pixel(0, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn svg_current_color_defaults_to_white_and_respects_explicit_color() {
+        for (color, expected) in [
+            ("", [255, 255, 255, 255]),
+            (" color=\"red\"", [255, 0, 0, 255]),
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"{color}>
+                    <rect width="20" height="20" fill="currentColor"/>
+                </svg>"#
+            );
+            let png = rasterize_project_svg(svg.as_bytes()).unwrap();
+            let icon = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(icon.get_pixel(128, 128).0, expected);
+        }
+    }
+
+    #[test]
+    fn svg_rasterization_refuses_active_external_and_oversize_content() {
+        for input in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///example.png"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+            r#"<!DOCTYPE svg [<!ENTITY x "x">]><svg xmlns="http://www.w3.org/2000/svg"/>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"/>"#,
+        ] {
+            assert!(rasterize_project_svg(input.as_bytes()).is_err());
+        }
+        assert!(rasterize_project_svg(&vec![0; 256 * 1024 + 1]).is_err());
+    }
 
     #[test]
     fn validates_copies_replaces_and_resets_project_image() {

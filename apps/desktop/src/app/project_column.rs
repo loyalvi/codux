@@ -23,7 +23,7 @@ struct ProjectRowDrag {
 }
 
 impl Render for ProjectRowDrag {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .w(px(44.0))
             .h(px(44.0))
@@ -36,6 +36,7 @@ impl Render for ProjectRowDrag {
                 self.custom_icon.clone(),
                 self.active,
                 self.collapsed,
+                window,
             ))
     }
 }
@@ -444,19 +445,48 @@ fn hidden_projects_button(
             (!collapsed).then(|| label.clone()),
             cx,
         ))
-        .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _window, _cx| {
-            projects
-                .iter()
-                .fold(menu.min_w(px(256.0)).max_w(px(360.0)), |menu, project| {
+        .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, _cx| {
+            let menu_width = (window.viewport_size().width - px(24.0))
+                .min(px(360.0))
+                .max(px(120.0));
+            let row_width = menu_width - px(44.0);
+            projects.iter().fold(
+                menu.min_w(menu_width).max_w(menu_width).scrollable(true),
+                |menu, project| {
                     let entity = menu_entity.clone();
                     let project_id = project.id.clone();
-                    let label = format!("{} · {}", project.name, project.path);
-                    menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        cx.update_entity(&entity, |app, cx| {
-                            app.set_project_sidebar_hidden(project_id.clone(), false, window, cx);
-                        });
-                    }))
-                })
+                    let name = project.name.clone();
+                    let path = project.path.clone();
+                    menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .w(row_width)
+                                .overflow_hidden()
+                                .child(div().w_full().truncate().child(name.clone()))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(path.clone()),
+                                )
+                        })
+                        .on_click(move |_, window, cx| {
+                            cx.update_entity(&entity, |app, cx| {
+                                app.set_project_sidebar_hidden(
+                                    project_id.clone(),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                    )
+                },
+            )
         });
     if collapsed {
         codux_tooltip_container_with_placement(
@@ -929,7 +959,7 @@ fn project_row(
                         .child(
                             div()
                                 .relative()
-                                .child(project_icon(&project, custom_icon, active, true))
+                                .child(project_icon(&project, custom_icon, active, true, window))
                                 .when_some(lifecycle_state, |this, state| {
                                     this.child(project_lifecycle_badge(state))
                                 })
@@ -1026,7 +1056,7 @@ fn project_row(
                 .child(
                     div()
                         .relative()
-                        .child(project_icon(&project, custom_icon, active, false))
+                        .child(project_icon(&project, custom_icon, active, false, window))
                         .when_some(lifecycle_state, |this, state| {
                             this.child(project_lifecycle_badge(state))
                         })
@@ -1222,6 +1252,7 @@ fn project_icon(
     custom_icon: Option<std::path::PathBuf>,
     active: bool,
     collapsed: bool,
+    window: &Window,
 ) -> impl IntoElement {
     let (background, _accent, text) = match project
         .badge_color_hex
@@ -1262,57 +1293,66 @@ fn project_icon(
                 .size_4()
                 .text_color(color(text))
                 .into_any_element(),
-            (None, None) => project_badge_text_element(&badge, text),
+            (None, None) => project_badge_text_element(badge, text, px(size - 6.0), window),
         })
 }
 
-fn project_badge_text_element(badge: &str, text_color: u32) -> AnyElement {
-    let chars = badge.chars().take(4).collect::<Vec<_>>();
-    let len = chars.len();
-    let text_size = match len {
-        0 | 1 => rems(0.875),
-        2 => rems(0.6875),
-        _ => rems(0.5625),
+fn project_badge_text_element(
+    badge: String,
+    text_color: u32,
+    max_width: gpui::Pixels,
+    window: &Window,
+) -> AnyElement {
+    let mut font = window.text_style().font();
+    font.weight = FontWeight::BOLD;
+    let fits = |text: &str, font_size: f32| {
+        if text.is_empty() {
+            return true;
+        }
+        window
+            .text_system()
+            .shape_line(
+                SharedString::from(text.to_owned()),
+                px(font_size),
+                &[gpui::TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: color(text_color),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+            <= max_width
     };
-
-    let content = if len <= 2 {
-        div()
-            .text_size(text_size)
-            .line_height(rems(1.0))
-            .child(chars.into_iter().collect::<String>())
-            .into_any_element()
-    } else {
-        let first_line_len = if len == 3 { 1 } else { 2 };
-        let first = chars
-            .iter()
-            .take(first_line_len)
-            .copied()
-            .collect::<String>();
-        let second = chars
-            .iter()
-            .skip(first_line_len)
-            .copied()
-            .collect::<String>();
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .text_size(text_size)
-            .line_height(rems(0.625))
-            .child(div().child(first))
-            .child(div().child(second))
-            .into_any_element()
-    };
-
+    let (badge, text_size) = fit_project_badge(badge, fits);
     div()
-        .flex()
-        .items_center()
-        .justify_center()
+        .max_w(max_width)
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(text_size))
+        .line_height(px(15.0))
         .text_color(color(text_color))
         .font_weight(FontWeight::BOLD)
-        .child(content)
+        .child(badge)
         .into_any_element()
+}
+
+fn fit_project_badge(mut badge: String, fits: impl Fn(&str, f32) -> bool) -> (String, f32) {
+    loop {
+        if let Some(size) = [12.0, 11.0, 10.0]
+            .into_iter()
+            .find(|size| fits(&badge, *size))
+        {
+            return (badge, size);
+        }
+        if badge.chars().count() <= 1 {
+            return (badge, 10.0);
+        }
+        badge.pop();
+    }
 }
 
 fn project_icon_palette(key: &str, active: bool) -> (u32, u32, u32) {
@@ -1397,7 +1437,13 @@ fn project_badge_label(project: &ProjectInfo) -> String {
     if badge.is_empty() {
         return project_initial(&project.name);
     }
-    badge.chars().take(4).collect::<String>().to_uppercase()
+    let badge = badge.to_uppercase();
+    let max_chars = if badge.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        4
+    } else {
+        2
+    };
+    badge.chars().take(max_chars).collect()
 }
 
 fn project_initial(name: &str) -> String {
@@ -1432,11 +1478,20 @@ mod tests {
         assert_eq!(project_badge_label(&project_with_badge("abcd")), "ABCD");
         assert_eq!(project_badge_label(&project_with_badge("abcde")), "ABCD");
         assert_eq!(project_badge_label(&project_with_badge("项目")), "项目");
-        assert_eq!(
-            project_badge_label(&project_with_badge("用户中心")),
-            "用户中心"
-        );
+        assert_eq!(project_badge_label(&project_with_badge("用户中心")), "用户");
         assert_eq!(project_badge_label(&project_with_badge(" ")), "P");
+    }
+
+    #[test]
+    fn project_badge_stays_on_one_line_and_shrinks_before_shortening() {
+        let fits = |text: &str, size: f32| text.chars().count() as f32 * size * 0.7 <= 30.0;
+        assert_eq!(fit_project_badge("APP".into(), fits), ("APP".into(), 12.0));
+        assert_eq!(
+            fit_project_badge("PANO".into(), fits),
+            ("PANO".into(), 10.0)
+        );
+        let wide = |text: &str, size: f32| text.chars().count() as f32 * size <= 30.0;
+        assert_eq!(fit_project_badge("WWWW".into(), wide), ("WWW".into(), 10.0));
     }
 
     #[test]
