@@ -9,7 +9,25 @@ import path from "node:path";
 process.env.CODUX_PACKAGE_GPUI_TEST_MODE = "true";
 process.env.RELEASE_STAGE_DIR = "target/release-package-test";
 
-const { __testPackageWindows, __testStageRuntimeAssets, __testWindowsNsisScript } = await import("./package-gpui.mjs");
+const {
+  __testPackageWindows,
+  __testStageRuntimeAssets,
+  __testWindowsNsisScript,
+  requiresTauriUpdaterSignature,
+} = await import("./package-gpui.mjs");
+
+const testCi = {
+  GITHUB_ACTIONS: "true",
+  GITHUB_WORKFLOW_REF: "owner/codux/.github/workflows/build-desktop-test.yml@refs/heads/test",
+};
+assert.equal(requiresTauriUpdaterSignature(testCi), false);
+assert.equal(requiresTauriUpdaterSignature({ ...testCi, RELEASE_REQUIRE_TAURI_SIGNATURE: "true" }), true);
+assert.equal(requiresTauriUpdaterSignature({ GITHUB_ACTIONS: "true" }), true);
+assert.equal(requiresTauriUpdaterSignature({
+  ...testCi,
+  GITHUB_WORKFLOW_REF: "owner/codux/.github/workflows/release-gpui.yml@refs/heads/main",
+}), true);
+assert.equal(requiresTauriUpdaterSignature({}), false);
 
 const script = __testWindowsNsisScript(
   path.join("C:", "tmp", "Codux"),

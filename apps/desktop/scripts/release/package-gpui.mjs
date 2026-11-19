@@ -383,7 +383,7 @@ function withTempDir(prefix, callback) {
 function signTauriUpdaterArtifact(filePath) {
   const privateKey = process.env.TAURI_PRIVATE_KEY?.trim() || process.env.TAURI_SIGNING_PRIVATE_KEY?.trim();
   if (!privateKey) {
-    if (isReleaseBuild()) {
+    if (requiresTauriUpdaterSignature()) {
       throw new Error(`Tauri updater signature key is required for ${path.basename(filePath)}`);
     }
     console.warn(`skipping Tauri updater signature for ${path.basename(filePath)}: signing key is not configured`);
@@ -402,8 +402,14 @@ function signTauriUpdaterArtifact(filePath) {
   });
 }
 
-function isReleaseBuild() {
-  return Boolean(process.env.GITHUB_ACTIONS || process.env.RELEASE_REQUIRE_TAURI_SIGNATURE === "true");
+export function requiresTauriUpdaterSignature(env = process.env) {
+  if (env.RELEASE_REQUIRE_TAURI_SIGNATURE === "true") return true;
+  if (!env.GITHUB_ACTIONS) return false;
+  // The desktop test workflow uploads CI artifacts only; it never publishes
+  // an updater. All other CI workflows keep the existing signing requirement.
+  return !/^[^/]+\/[^/]+\/\.github\/workflows\/build-desktop-test\.yml@refs\//.test(
+    env.GITHUB_WORKFLOW_REF || "",
+  );
 }
 
 function windowsNsisScript(packageDir, installerPath) {
