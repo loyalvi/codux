@@ -120,6 +120,8 @@ mod pet_actions;
 mod project_actions;
 mod project_column;
 mod project_column_actions;
+mod project_batch_import;
+mod project_batch_scan;
 mod project_editor;
 mod quick_input;
 mod quick_pick;

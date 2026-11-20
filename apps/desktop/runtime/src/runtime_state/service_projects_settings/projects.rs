@@ -134,6 +134,23 @@ impl RuntimeService {
         Ok(project_id)
     }
 
+    pub fn add_local_projects(
+        &self,
+        candidates: &[(String, String)],
+    ) -> Result<(usize, usize), String> {
+        let store = ProjectStore::new(self.support_dir.clone());
+        let result = store.add_local_projects(candidates)?;
+        if result.0 > 0 {
+            self.project_activity.seed_projects(store.projects_snapshot());
+            self.sync_pet_project_memberships();
+        }
+        Ok(result)
+    }
+
+    pub fn reload_project_list(&self) -> Vec<ProjectInfo> {
+        load_projects(&self.support_dir).0
+    }
+
     pub fn update_project(&self, project_id: &str, name: &str, path: &str) -> Result<(), String> {
         ProjectStore::new(self.support_dir.clone()).update_project(project_id, name, path)?;
         self.mark_project_active_with_watch(project_id)?;

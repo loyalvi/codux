@@ -23,10 +23,56 @@ impl CoduxApp {
             let mut state =
                 ProjectListState::new(self.state.projects.clone(), self.selected_project_id());
             state.lifecycle = lifecycle;
+            state.hidden_projects = load_hidden_projects(&self.state.support_dir);
             state
         });
         self.project_list_state = Some(state.clone());
         state
+    }
+
+    pub(super) fn set_project_sidebar_hidden(
+        &mut self,
+        project_id: String,
+        hide: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.state.projects.iter().position(|p| p.id == project_id) else {
+            return;
+        };
+        let list = self.ensure_project_list_state(cx);
+        let mut hidden = list.update(cx, |state, _cx| state.hidden_projects.clone());
+        let changed = if hide {
+            hidden.insert(project_id.clone())
+        } else {
+            hidden.remove(&project_id)
+        };
+        if !changed {
+            return;
+        }
+
+        if let Err(error) = save_hidden_projects(&self.state.support_dir, &hidden) {
+            self.status_message = format!("Failed to save project visibility: {error}");
+            self.invalidate_status_bar(cx);
+            return;
+        }
+        let next = if !hide {
+            Some(project_id)
+        } else if self.selected_project_id().as_deref() == Some(project_id.as_str()) {
+            adjacent_visible_index(&self.state.projects, index, |p| !hidden.contains(&p.id))
+                .map(|index| self.state.projects[index].id.clone())
+        } else {
+            None
+        };
+        list.update(cx, |state, cx| {
+            state.hidden_projects = hidden;
+            cx.notify();
+        });
+        // With no visible project left, keep the current workspace running and
+        // leave the sidebar's recovery menu available.
+        if let Some(next) = next {
+            self.select_project(next, window, cx);
+        }
     }
 
     pub(super) fn sync_project_list_state(&mut self, cx: &mut Context<Self>) {
@@ -200,5 +246,74 @@ impl CoduxApp {
         });
         self.project_column_view = Some(view.clone());
         view
+    }
+}
+
+fn adjacent_visible_index<T>(
+    projects: &[T],
+    selected_index: usize,
+    visible: impl Fn(&T) -> bool,
+) -> Option<usize> {
+    (selected_index + 1..projects.len())
+        .chain((0..selected_index).rev())
+        .find(|&index| visible(&projects[index]))
+}
+
+const HIDDEN_PROJECTS_FILE: &str = "sidebar-hidden-projects.json";
+
+pub(super) fn load_hidden_projects(support_dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+    std::fs::read(support_dir.join(HIDDEN_PROJECTS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_hidden_projects(
+    support_dir: &std::path::Path,
+    hidden: &std::collections::BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(support_dir)?;
+    let path = support_dir.join(HIDDEN_PROJECTS_FILE);
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, serde_json::to_vec(hidden)?)?;
+    std::fs::rename(temp, path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    #[test]
+    fn chooses_the_next_visible_project_then_the_previous_one() {
+        assert_eq!(
+            adjacent_visible_index(&[true, false, false, true], 1, |p| *p),
+            Some(3)
+        );
+        assert_eq!(
+            adjacent_visible_index(&[true, false, false], 1, |p| *p),
+            Some(0)
+        );
+        assert_eq!(adjacent_visible_index(&[false], 0, |p| *p), None);
+    }
+
+    #[test]
+    fn hidden_projects_survive_reload_and_can_be_restored() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "codux-sidebar-visibility-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut hidden = load_hidden_projects(&dir);
+        assert!(hidden.insert("project-a".to_string()));
+        save_hidden_projects(&dir, &hidden).unwrap();
+        assert_eq!(load_hidden_projects(&dir), hidden);
+        assert!(hidden.remove("project-a"));
+        save_hidden_projects(&dir, &hidden).unwrap();
+        assert!(load_hidden_projects(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

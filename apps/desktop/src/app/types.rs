@@ -22,6 +22,8 @@ pub(in crate::app) enum FilePickerMode {
 pub(in crate::app) enum FilePickerTarget {
     /// The project-editor window's directory field (add/edit a project).
     ProjectEditorPath,
+    ProjectEditorIcon,
+    ProjectBatchRoot,
     /// "Save as…" from the file sidebar: copy `source_path` to the chosen
     /// destination on `device_id` (the project's host, or local).
     SaveFileAs {

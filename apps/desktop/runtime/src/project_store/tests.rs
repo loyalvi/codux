@@ -7,6 +7,67 @@ use std::{
 };
 
 #[test]
+fn batch_add_only_registers_chosen_new_local_projects_and_preserves_selection() {
+    let root = temp_dir("batch-add-projects");
+    let support_dir = root.join("app");
+    fs::create_dir_all(&support_dir).unwrap();
+    let checkout = |name: &str| {
+        let path = root.join(name);
+        let git = path.join(".git");
+        fs::create_dir_all(git.join("objects")).unwrap();
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        path.to_str().unwrap().to_string()
+    };
+    let existing = checkout("existing");
+    let first = checkout("first/same-name");
+    let second = checkout("second/same-name");
+    let _not_selected = checkout("not-selected");
+    let unavailable = root.join("vanished").to_str().unwrap().to_string();
+    fs::write(
+        support_dir.join("state.json"),
+        json!({
+            "projects": [
+                {"id": "hidden", "name": "Keep me", "path": existing, "extra": true},
+                {"id": "remote", "name": "A remote", "path": first,
+                    "runtimeTarget": {"kind": "remote", "deviceId": "server"}}
+            ],
+            "selectedProjectId": "remote",
+            "anotherSetting": {"preserve": true}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let hidden_file = support_dir.join("sidebar-hidden-projects.json");
+    fs::write(&hidden_file, "[\"hidden\"]").unwrap();
+    let candidates = [
+        ("Rename?".to_string(), existing),
+        ("same-name".to_string(), first.clone()),
+        ("Duplicate".to_string(), first),
+        ("same-name".to_string(), second),
+        ("Missing".to_string(), unavailable),
+    ];
+    let store = ProjectStore::new(support_dir.clone());
+    assert_eq!(store.add_local_projects(&candidates).unwrap(), (2, 3));
+    assert_eq!(store.add_local_projects(&candidates).unwrap(), (0, 5));
+
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(support_dir.join("state.json")).unwrap()).unwrap();
+    let projects = state["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 4);
+    assert_eq!(projects[0]["name"], "Keep me");
+    assert_eq!(projects[0]["extra"], true);
+    assert_eq!(projects[1]["runtimeTarget"]["kind"], "remote");
+    assert_eq!(projects[2]["runtimeTarget"]["kind"], "local");
+    assert_eq!(projects[2]["name"], "same-name");
+    assert_eq!(projects[3]["name"], "same-name");
+    assert_ne!(projects[2]["id"], projects[3]["id"]);
+    assert_eq!(state["selectedProjectId"], "remote");
+    assert_eq!(state["anotherSetting"]["preserve"], true);
+    assert_eq!(fs::read_to_string(hidden_file).unwrap(), "[\"hidden\"]");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_root_missing_only_reports_deleted_local_projects() {
     let dir = temp_dir("project-root-missing");
     let local_dir = dir.join("local-project");

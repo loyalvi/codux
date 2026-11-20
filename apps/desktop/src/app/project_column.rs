@@ -17,12 +17,13 @@ const PROJECT_TOOL_ICON_WIDTH: f32 = 40.0;
 struct ProjectRowDrag {
     project_id: String,
     project: ProjectInfo,
+    custom_icon: Option<std::path::PathBuf>,
     active: bool,
     collapsed: bool,
 }
 
 impl Render for ProjectRowDrag {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .w(px(44.0))
             .h(px(44.0))
@@ -30,7 +31,13 @@ impl Render for ProjectRowDrag {
             .flex()
             .items_center()
             .justify_center()
-            .child(project_icon(&self.project, self.active, self.collapsed))
+            .child(project_icon(
+                &self.project,
+                self.custom_icon.clone(),
+                self.active,
+                self.collapsed,
+                window,
+            ))
     }
 }
 
@@ -50,6 +57,7 @@ pub(in crate::app) struct ProjectListState {
     /// Client→host link state per host device id, for the remote connection
     /// badge on a project icon.
     pub(in crate::app) links: HashMap<String, ControllerLinkState>,
+    pub(super) hidden_projects: std::collections::BTreeSet<String>,
     revision: u64,
 }
 
@@ -63,6 +71,7 @@ impl ProjectListState {
             selected_project_id,
             lifecycle: HashMap::new(),
             links: HashMap::new(),
+            hidden_projects: Default::default(),
             revision: 0,
         }
     }
@@ -126,16 +135,18 @@ impl ProjectListState {
 impl Render for ProjectColumnView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.collapsed;
-        let (projects, selected_project_id, lifecycle, links) =
+        let (projects, selected_project_id, lifecycle, links, hidden) =
             self.project_list_state.update(cx, |state, _cx| {
                 (
                     state.projects.clone(),
                     state.selected_project_id.clone(),
                     state.lifecycle.clone(),
                     state.links.clone(),
+                    state.hidden_projects.clone(),
                 )
             });
         let app_entity = self.app_entity.clone();
+        let support_dir = app_entity.read(cx).state.support_dir.clone();
         let scroll_handle = self.scroll_handle.clone();
         let language = self.language.clone();
         let row_menu_labels = project_row_menu_labels(language.as_str());
@@ -143,6 +154,12 @@ impl Render for ProjectColumnView {
             .iter()
             .map(|project| project.id.clone())
             .collect::<Vec<_>>();
+
+        let (hidden_projects, visible_projects): (Vec<_>, Vec<_>) = projects
+            .iter()
+            .cloned()
+            .partition(|project| hidden.contains(&project.id));
+        let visible_projects = Rc::new(visible_projects);
 
         div()
             .flex()
@@ -171,7 +188,7 @@ impl Render for ProjectColumnView {
                     .overflow_hidden()
                     .child(codux_uniform_list(
                         "project-list",
-                        projects.clone(),
+                        visible_projects,
                         scroll_handle,
                         None,
                         cx,
@@ -193,6 +210,11 @@ impl Render for ProjectColumnView {
                                 .pb(px(4.0))
                                 .child(project_row(
                                     ProjectRowInput {
+                                        custom_icon:
+                                            super::project_editor::custom_project_icon_path(
+                                                &support_dir,
+                                                &project.id,
+                                            ),
                                         project,
                                         active,
                                         app_entity: app_entity.clone(),
@@ -214,6 +236,7 @@ impl Render for ProjectColumnView {
                 collapsed,
                 self.language.as_str(),
                 self.app_entity.clone(),
+                hidden_projects,
                 window,
                 cx,
             ))
@@ -274,6 +297,7 @@ fn project_tools_snapshot(
     collapsed: bool,
     language: &str,
     app_entity: gpui::Entity<CoduxApp>,
+    hidden_projects: Vec<ProjectInfo>,
     window: &mut Window,
     cx: &mut Context<ProjectColumnView>,
 ) -> AnyElement {
@@ -303,6 +327,15 @@ fn project_tools_snapshot(
                 cx,
                 |app, _event, window, cx| app.open_project_create_window(window, cx),
             ))
+            .when(!hidden_projects.is_empty(), |base| {
+                base.child(hidden_projects_button(
+                    collapsed,
+                    language,
+                    app_entity.clone(),
+                    hidden_projects,
+                    cx,
+                ))
+            })
             .child(project_tool_button(
                 ProjectToolButtonProps {
                     icon: HeroIconName::Cog6Tooth,
@@ -347,6 +380,15 @@ fn project_tools_snapshot(
                 cx,
                 |app, _event, window, cx| app.open_project_create_window(window, cx),
             ))
+            .when(!hidden_projects.is_empty(), |base| {
+                base.child(hidden_projects_button(
+                    collapsed,
+                    language,
+                    app_entity.clone(),
+                    hidden_projects,
+                    cx,
+                ))
+            })
             .child(project_tool_button(
                 ProjectToolButtonProps {
                     icon: HeroIconName::Cog6Tooth,
@@ -367,6 +409,96 @@ fn project_tools_snapshot(
                 cx,
             ))
             .into_any_element()
+    }
+}
+
+fn hidden_projects_button(
+    collapsed: bool,
+    language: &str,
+    app_entity: gpui::Entity<CoduxApp>,
+    projects: Vec<ProjectInfo>,
+    cx: &mut Context<ProjectColumnView>,
+) -> AnyElement {
+    let label = project_column_text(
+        language,
+        "sidebar.footer.hidden_projects",
+        "Hidden Projects",
+    );
+    let button = Button::new("project-tool-hidden-projects")
+        .ghost()
+        .with_size(Size::Medium)
+        .text_color(cx.theme().secondary_foreground)
+        .w(if collapsed {
+            px(PROJECT_TOOL_ICON_WIDTH)
+        } else {
+            px(PROJECT_TOOL_LABEL_WIDTH)
+        });
+    let button = if collapsed {
+        button
+    } else {
+        button.justify_start()
+    };
+    let menu_entity = app_entity.clone();
+    let button = button
+        .child(project_tool_content(
+            HeroIconName::ArchiveBox,
+            (!collapsed).then(|| label.clone()),
+            cx,
+        ))
+        .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, _cx| {
+            let menu_width = (window.viewport_size().width - px(24.0))
+                .min(px(360.0))
+                .max(px(120.0));
+            let row_width = menu_width - px(44.0);
+            projects.iter().fold(
+                menu.min_w(menu_width).max_w(menu_width).scrollable(true),
+                |menu, project| {
+                    let entity = menu_entity.clone();
+                    let project_id = project.id.clone();
+                    let name = project.name.clone();
+                    let path = project.path.clone();
+                    menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .w(row_width)
+                                .overflow_hidden()
+                                .child(div().w_full().truncate().child(name.clone()))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(path.clone()),
+                                )
+                        })
+                        .on_click(move |_, window, cx| {
+                            cx.update_entity(&entity, |app, cx| {
+                                app.set_project_sidebar_hidden(
+                                    project_id.clone(),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                    )
+                },
+            )
+        });
+    if collapsed {
+        codux_tooltip_container_with_placement(
+            app_entity,
+            "project-tool-hidden-projects-tooltip",
+            label,
+            CoduxTooltipPlacement::Right,
+        )
+        .child(button)
+        .into_any_element()
+    } else {
+        button.into_any_element()
     }
 }
 
@@ -537,7 +669,11 @@ fn project_more_button(
                         menu.item(PopupMenuItem::new(label).icon(icon).on_click(
                             move |_, window, cx| {
                                 cx.update_entity(&entity, |app, cx| {
-                                    app.apply_project_help_action(action_id, window, cx);
+                                    if action_id == "help:batch-import" {
+                                        app.open_project_batch_import_window(window, cx);
+                                    } else {
+                                        app.apply_project_help_action(action_id, window, cx);
+                                    }
                                 });
                             },
                         ))
@@ -577,6 +713,11 @@ fn project_help_menu_entries(language: &str) -> Vec<ProjectHelpMenuEntry> {
             label: label("menu.file.open_folder", "Open Folder..."),
             icon: HeroIconName::FolderOpen,
             action_id: "help:open-folder",
+        },
+        Item {
+            label: label("project.batch.title", "Import Git projects…"),
+            icon: HeroIconName::FolderPlus,
+            action_id: "help:batch-import",
         },
         Separator,
         Item {
@@ -687,6 +828,7 @@ fn project_column_toggle_button(
 
 struct ProjectRowInput {
     project: ProjectInfo,
+    custom_icon: Option<std::path::PathBuf>,
     active: bool,
     app_entity: gpui::Entity<CoduxApp>,
     project_id: String,
@@ -704,6 +846,7 @@ fn project_row(
 ) -> AnyElement {
     let ProjectRowInput {
         project,
+        custom_icon,
         active,
         app_entity,
         project_id,
@@ -728,6 +871,7 @@ fn project_row(
                 ProjectRowDrag {
                     project_id: drag_project.id.clone(),
                     project: drag_project,
+                    custom_icon: custom_icon.clone(),
                     active,
                     collapsed: true,
                 },
@@ -736,6 +880,7 @@ fn project_row(
                     cx.new(|_| ProjectRowDrag {
                         project_id: drag.project_id.clone(),
                         project: drag.project.clone(),
+                        custom_icon: drag.custom_icon.clone(),
                         active: drag.active,
                         collapsed: drag.collapsed,
                     })
@@ -823,7 +968,7 @@ fn project_row(
                         .child(
                             div()
                                 .relative()
-                                .child(project_icon(&project, active, true))
+                                .child(project_icon(&project, custom_icon, active, true, window))
                                 .when_some(lifecycle_state, |this, state| {
                                     this.child(project_lifecycle_badge(state))
                                 })
@@ -846,6 +991,7 @@ fn project_row(
             ProjectRowDrag {
                 project_id: drag_project.id.clone(),
                 project: drag_project,
+                custom_icon: custom_icon.clone(),
                 active,
                 collapsed: false,
             },
@@ -854,6 +1000,7 @@ fn project_row(
                 cx.new(|_| ProjectRowDrag {
                     project_id: drag.project_id.clone(),
                     project: drag.project.clone(),
+                    custom_icon: drag.custom_icon.clone(),
                     active: drag.active,
                     collapsed: drag.collapsed,
                 })
@@ -918,7 +1065,7 @@ fn project_row(
                 .child(
                     div()
                         .relative()
-                        .child(project_icon(&project, active, false))
+                        .child(project_icon(&project, custom_icon, active, false, window))
                         .when_some(lifecycle_state, |this, state| {
                             this.child(project_lifecycle_badge(state))
                         })
@@ -963,6 +1110,7 @@ struct ProjectRowMenuLabels {
     open_folder: String,
     edit: String,
     remove: String,
+    hide: String,
 }
 
 fn project_row_menu_labels(language: &str) -> ProjectRowMenuLabels {
@@ -971,6 +1119,7 @@ fn project_row_menu_labels(language: &str) -> ProjectRowMenuLabels {
         open_folder: translate(&locale, "sidebar.project.open_folder", "Open Folder"),
         edit: translate(&locale, "sidebar.project.edit", "Edit Project"),
         remove: translate(&locale, "sidebar.project.remove", "Remove Project"),
+        hide: translate(&locale, "sidebar.project.hide", "Hide from Sidebar"),
     }
 }
 
@@ -987,6 +1136,8 @@ fn project_row_context_menu(
     let open_path = project_path.clone();
     let edit_entity = app_entity.clone();
     let edit_id = project_id.clone();
+    let hide_entity = app_entity.clone();
+    let hide_id = project_id.clone();
     let remove_entity = app_entity;
 
     menu.item(
@@ -1004,6 +1155,15 @@ fn project_row_context_menu(
             .on_click(move |_, window, cx| {
                 cx.update_entity(&edit_entity, |app, cx| {
                     app.edit_project_by_id(edit_id.clone(), window, cx);
+                });
+            }),
+    )
+    .item(
+        PopupMenuItem::new(labels.hide)
+            .icon(HeroIconName::EyeSlash)
+            .on_click(move |_, window, cx| {
+                cx.update_entity(&hide_entity, |app, cx| {
+                    app.set_project_sidebar_hidden(hide_id.clone(), true, window, cx);
                 });
             }),
     )
@@ -1096,7 +1256,13 @@ fn project_remote_badge(link: Option<ControllerLinkState>) -> AnyElement {
         .into_any_element()
 }
 
-fn project_icon(project: &ProjectInfo, active: bool, collapsed: bool) -> impl IntoElement {
+fn project_icon(
+    project: &ProjectInfo,
+    custom_icon: Option<std::path::PathBuf>,
+    active: bool,
+    collapsed: bool,
+    window: &Window,
+) -> impl IntoElement {
     let (background, _accent, text) = match project
         .badge_color_hex
         .as_deref()
@@ -1126,62 +1292,76 @@ fn project_icon(project: &ProjectInfo, active: bool, collapsed: bool) -> impl In
         .text_color(color(text))
         .font_weight(FontWeight::BOLD)
         .when(!active, |this| this.opacity(INACTIVE_PROJECT_ICON_OPACITY))
-        .child(match symbol_icon {
-            Some(icon) => Icon::new(icon)
+        .overflow_hidden()
+        .child(match (custom_icon, symbol_icon) {
+            (Some(path), _) => gpui::img(path)
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover)
+                .into_any_element(),
+            (None, Some(icon)) => Icon::new(icon)
                 .size_4()
                 .text_color(color(text))
                 .into_any_element(),
-            None => project_badge_text_element(&badge, text),
+            (None, None) => project_badge_text_element(badge, text, px(size - 6.0), window),
         })
 }
 
-fn project_badge_text_element(badge: &str, text_color: u32) -> AnyElement {
-    let chars = badge.chars().take(4).collect::<Vec<_>>();
-    let len = chars.len();
-    let text_size = match len {
-        0 | 1 => rems(0.875),
-        2 => rems(0.6875),
-        _ => rems(0.5625),
+fn project_badge_text_element(
+    badge: String,
+    text_color: u32,
+    max_width: gpui::Pixels,
+    window: &Window,
+) -> AnyElement {
+    let mut font = window.text_style().font();
+    font.weight = FontWeight::BOLD;
+    let fits = |text: &str, font_size: f32| {
+        if text.is_empty() {
+            return true;
+        }
+        window
+            .text_system()
+            .shape_line(
+                SharedString::from(text.to_owned()),
+                px(font_size),
+                &[gpui::TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: color(text_color),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+            <= max_width
     };
-
-    let content = if len <= 2 {
-        div()
-            .text_size(text_size)
-            .line_height(rems(1.0))
-            .child(chars.into_iter().collect::<String>())
-            .into_any_element()
-    } else {
-        let first_line_len = if len == 3 { 1 } else { 2 };
-        let first = chars
-            .iter()
-            .take(first_line_len)
-            .copied()
-            .collect::<String>();
-        let second = chars
-            .iter()
-            .skip(first_line_len)
-            .copied()
-            .collect::<String>();
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .text_size(text_size)
-            .line_height(rems(0.625))
-            .child(div().child(first))
-            .child(div().child(second))
-            .into_any_element()
-    };
-
+    let (badge, text_size) = fit_project_badge(badge, fits);
     div()
-        .flex()
-        .items_center()
-        .justify_center()
+        .max_w(max_width)
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(text_size))
+        .line_height(px(15.0))
         .text_color(color(text_color))
         .font_weight(FontWeight::BOLD)
-        .child(content)
+        .child(badge)
         .into_any_element()
+}
+
+fn fit_project_badge(mut badge: String, fits: impl Fn(&str, f32) -> bool) -> (String, f32) {
+    loop {
+        if let Some(size) = [12.0, 11.0, 10.0]
+            .into_iter()
+            .find(|size| fits(&badge, *size))
+        {
+            return (badge, size);
+        }
+        if badge.chars().count() <= 1 {
+            return (badge, 10.0);
+        }
+        badge.pop();
+    }
 }
 
 fn project_icon_palette(key: &str, active: bool) -> (u32, u32, u32) {
@@ -1266,7 +1446,13 @@ fn project_badge_label(project: &ProjectInfo) -> String {
     if badge.is_empty() {
         return project_initial(&project.name);
     }
-    badge.chars().take(4).collect::<String>().to_uppercase()
+    let badge = badge.to_uppercase();
+    let max_chars = if badge.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        4
+    } else {
+        2
+    };
+    badge.chars().take(max_chars).collect()
 }
 
 fn project_initial(name: &str) -> String {
@@ -1301,11 +1487,20 @@ mod tests {
         assert_eq!(project_badge_label(&project_with_badge("abcd")), "ABCD");
         assert_eq!(project_badge_label(&project_with_badge("abcde")), "ABCD");
         assert_eq!(project_badge_label(&project_with_badge("项目")), "项目");
-        assert_eq!(
-            project_badge_label(&project_with_badge("用户中心")),
-            "用户中心"
-        );
+        assert_eq!(project_badge_label(&project_with_badge("用户中心")), "用户");
         assert_eq!(project_badge_label(&project_with_badge(" ")), "P");
+    }
+
+    #[test]
+    fn project_badge_stays_on_one_line_and_shrinks_before_shortening() {
+        let fits = |text: &str, size: f32| text.chars().count() as f32 * size * 0.7 <= 30.0;
+        assert_eq!(fit_project_badge("APP".into(), fits), ("APP".into(), 12.0));
+        assert_eq!(
+            fit_project_badge("PANO".into(), fits),
+            ("PANO".into(), 10.0)
+        );
+        let wide = |text: &str, size: f32| text.chars().count() as f32 * size <= 30.0;
+        assert_eq!(fit_project_badge("WWWW".into(), wide), ("WWW".into(), 10.0));
     }
 
     #[test]

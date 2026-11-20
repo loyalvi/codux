@@ -188,6 +188,21 @@ impl CoduxApp {
         cx: &mut Context<Self>,
     ) {
         match target {
+            FilePickerTarget::ProjectBatchRoot => {
+                if matches!(destination_target, ProjectRuntimeTarget::Local) {
+                    self.start_project_batch_scan(path.into(), cx);
+                } else {
+                    self.reject_project_batch_remote_root(cx);
+                }
+            }
+            FilePickerTarget::ProjectEditorIcon => {
+                if matches!(destination_target, ProjectRuntimeTarget::Local) {
+                    self.apply_project_icon(Some(std::path::PathBuf::from(path)), cx);
+                } else {
+                    self.status_message = "Project image must come from this computer.".to_string();
+                    self.invalidate_project_management(cx);
+                }
+            }
             FilePickerTarget::ProjectEditorPath => {
                 // The picker chose both the device and the directory.
                 self.project_editor_runtime_target = destination_target;

@@ -353,6 +353,66 @@ impl ProjectStore {
         self.create_or_select_project_with_target(name, path, &ProjectRuntimeTarget::Local)
     }
 
+    /// Register the checkouts chosen in the batch preview without activating
+    /// any of them. Recheck existence and deduplicate against the live state
+    /// (rather than the snapshot the preview was built from).
+    pub(crate) fn add_local_projects(
+        &self,
+        candidates: &[(String, String)],
+    ) -> Result<(usize, usize), String> {
+        use codux_runtime_core::path::{local_path_identity_key, normalize_local_path};
+        use std::path::Path;
+
+        let mut ready = Vec::new();
+        for (name, path) in candidates {
+            let path = Path::new(path);
+            if !path.is_absolute() || !path.is_dir() {
+                continue;
+            }
+            let Ok(marker) = std::fs::symlink_metadata(path.join(".git")) else {
+                continue;
+            };
+            if !marker.is_dir() && !marker.is_file() {
+                continue;
+            }
+            let path = normalize_local_path(path);
+            let Some(key) = local_path_identity_key(Path::new(&path)) else {
+                continue;
+            };
+            let name = normalized_project_name(name, &path, false);
+            ready.push((name, path, key));
+        }
+        if ready.is_empty() {
+            return Ok((0, candidates.len()));
+        }
+
+        let target = runtime_target_value(&ProjectRuntimeTarget::Local)?;
+        crate::config::ConfigStore::for_file(self.state_file.clone()).update_sync(|raw| {
+            if raw.get("projects").is_some_and(|value| !value.is_array()) {
+                return Err("Existing project list is not an array.".to_string());
+            }
+            let projects = ensure_array(raw, "projects")?;
+            let mut known_paths = projects
+                .iter()
+                .filter_map(|value| serde_json::from_value::<ProjectRecord>(value.clone()).ok())
+                .filter(|p| p.runtime_target.is_local())
+                .filter_map(|p| local_path_identity_key(Path::new(&p.path)))
+                .collect::<HashSet<_>>();
+            let mut added = 0;
+            for (name, path, key) in ready {
+                if !known_paths.insert(key) {
+                    continue;
+                }
+                let id = project_uuid(&name, &path, None);
+                let mut record = project_record(&id, &name, &path);
+                record.insert("runtimeTarget".to_string(), target.clone());
+                projects.push(Value::Object(record));
+                added += 1;
+            }
+            Ok((added, candidates.len() - added))
+        })
+    }
+
     /// Hosted projects keep their runtime-side paths verbatim instead of
     /// validating them against the desktop filesystem. A path such as
     /// existence, so a Windows `F:\test` browsed on a paired host can be saved
