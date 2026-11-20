@@ -460,6 +460,7 @@ impl CoduxApp {
             file_sidebar_view: None,
             project_open_applications,
             project_editor_project_id: None,
+            project_batch_import: None,
             project_editor_name: String::new(),
             project_editor_path: String::new(),
             project_editor_badge_symbol: None,

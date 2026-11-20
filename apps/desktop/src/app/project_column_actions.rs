@@ -261,7 +261,7 @@ fn adjacent_visible_index<T>(
 
 const HIDDEN_PROJECTS_FILE: &str = "sidebar-hidden-projects.json";
 
-fn load_hidden_projects(support_dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+pub(super) fn load_hidden_projects(support_dir: &std::path::Path) -> std::collections::BTreeSet<String> {
     std::fs::read(support_dir.join(HIDDEN_PROJECTS_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())

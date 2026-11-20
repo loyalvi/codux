@@ -139,6 +139,23 @@ impl CoduxApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_project_create_or_import_window(false, window, cx);
+    }
+
+    pub(in crate::app) fn open_project_batch_import_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_project_create_or_import_window(true, window, cx);
+    }
+
+    fn open_project_create_or_import_window(
+        &mut self,
+        batch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let locale = locale_from_language_setting(&self.state.settings.language);
         if Self::activate_child_window(&mut self.project_editor_window, cx) {
             self.status_message = "project creator already opened".to_string();
@@ -154,10 +171,22 @@ impl CoduxApp {
                 slot: AuxiliaryWindowSlot::ProjectEditor,
                 title: SharedString::from(translate(
                     &locale,
-                    "project.create.title",
-                    "Create Project",
+                    if batch {
+                        "project.batch.title"
+                    } else {
+                        "project.create.title"
+                    },
+                    if batch {
+                        "Import Git projects…"
+                    } else {
+                        "Create Project"
+                    },
                 )),
-                size: size(px(620.0), px(446.0)),
+                size: if batch {
+                    size(px(760.), px(600.))
+                } else {
+                    size(px(620.0), px(446.0))
+                },
                 min_size: size(px(520.0), px(390.0)),
                 already_open_message: "project creator already opened",
                 opened_message: "project creator opened",
@@ -170,6 +199,7 @@ impl CoduxApp {
                     runtime,
                     runtime_service,
                 );
+                app.project_batch_import = batch.then(Default::default);
                 app.parent_main_window = Some(parent_main_window);
                 app.parent_main_window_handle = Some(parent_window_handle);
                 app

@@ -8,7 +8,10 @@ impl CoduxApp {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        if self.project_batch_import.is_some() {
+            return self.project_batch_import_workspace(window, cx);
+        }
         let language = self.state.settings.language.as_str();
         let locale = locale_from_language_setting(language);
         let tr = |key: &str, fallback: &str| translate(&locale, key, fallback);
@@ -36,6 +39,7 @@ impl CoduxApp {
                     .flex()
                     .flex_col()
                     .p(px(18.0))
+                    .when(!is_editing, |body| body.child(self.project_batch_import_entry(cx)))
                     .child(project_editor_field(
                         tr("project.editor.name", "Project Name"),
                         "project-editor-name",
@@ -170,6 +174,7 @@ impl CoduxApp {
                     ),
                 cx,
             ))
+            .into_any_element()
     }
 }
 

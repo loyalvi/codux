@@ -669,7 +669,11 @@ fn project_more_button(
                         menu.item(PopupMenuItem::new(label).icon(icon).on_click(
                             move |_, window, cx| {
                                 cx.update_entity(&entity, |app, cx| {
-                                    app.apply_project_help_action(action_id, window, cx);
+                                    if action_id == "help:batch-import" {
+                                        app.open_project_batch_import_window(window, cx);
+                                    } else {
+                                        app.apply_project_help_action(action_id, window, cx);
+                                    }
                                 });
                             },
                         ))
@@ -709,6 +713,11 @@ fn project_help_menu_entries(language: &str) -> Vec<ProjectHelpMenuEntry> {
             label: label("menu.file.open_folder", "Open Folder..."),
             icon: HeroIconName::FolderOpen,
             action_id: "help:open-folder",
+        },
+        Item {
+            label: label("project.batch.title", "Import Git projects…"),
+            icon: HeroIconName::FolderPlus,
+            action_id: "help:batch-import",
         },
         Separator,
         Item {

@@ -418,6 +418,7 @@ pub struct CoduxApp {
     pub(in crate::app) file_sidebar_view: Option<gpui::Entity<FileSidebarView>>,
     pub(in crate::app) project_open_applications: Vec<ProjectOpenApplicationSummary>,
     pub(in crate::app) project_editor_project_id: Option<String>,
+    pub(in crate::app) project_batch_import: Option<super::project_batch_import::ProjectBatchImport>,
     pub(in crate::app) project_editor_name: String,
     pub(in crate::app) project_editor_path: String,
     pub(in crate::app) project_editor_badge_symbol: Option<String>,

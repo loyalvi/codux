@@ -188,6 +188,13 @@ impl CoduxApp {
         cx: &mut Context<Self>,
     ) {
         match target {
+            FilePickerTarget::ProjectBatchRoot => {
+                if matches!(destination_target, ProjectRuntimeTarget::Local) {
+                    self.start_project_batch_scan(path.into(), cx);
+                } else {
+                    self.reject_project_batch_remote_root(cx);
+                }
+            }
             FilePickerTarget::ProjectEditorIcon => {
                 if matches!(destination_target, ProjectRuntimeTarget::Local) {
                     self.apply_project_icon(Some(std::path::PathBuf::from(path)), cx);
